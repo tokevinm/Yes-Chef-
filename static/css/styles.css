@@ -1,0 +1,28 @@
+a {
+    color: black;
+}
+
+.btn-primary {
+    background-color: orange;
+    border-color: orange;
+}
+
+.btn-primary:hover {
+    background-color: #FFC107;
+    border-color: #FFC107;
+}
+
+body {
+    background-color: #fff3e3;
+    background-image: linear-gradient(to bottom, orange, white);
+}
+
+.main-content {
+    padding-top: 20px;
+    background-color: white
+}
+
+.side-pad {
+    padding-left: 50px;
+    padding-right: 50px;
+}
