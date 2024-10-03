@@ -1,25 +1,35 @@
 import os
+import re
+import smtplib
+import requests
+from bs4 import BeautifulSoup
 from typing import List
-from flask import Flask, abort, render_template, redirect, url_for, flash, request
+from flask import Flask, render_template, redirect, url_for, flash, request, session
 from flask_bootstrap import Bootstrap5
 from flask_login import UserMixin, login_user, LoginManager, current_user, logout_user
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import relationship, DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import Integer, String, Text, ForeignKey
 from werkzeug.security import generate_password_hash, check_password_hash
-from forms import RecipeForm, RegisterForm, LoginForm, AIQueryForm
 from titlecase import titlecase
 from groq import Groq
 from markdown import markdown
+from uuid import uuid4
+from forms import RecipeForm, RegisterForm, RegisterCont, LoginForm, AIQueryForm, EditProfileForm, CommentForm, GetRecipeForm
 
 API_KEY = "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"
+ALLOWED_URLS = ["allrecipes"]
 
 client = Groq(
     api_key=API_KEY,
 )
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = '8BYkEfBA6O6DonzWlSihBXox7C0sKR6d'
+app.config['SECRET_KEY'] = '8BYkEfBA6O6DonzWlSihBXox7C0sKR6a'
+app.config['MAX_CONTENT_LENGTH'] = 2556 * 1179
+app.config['RECIPE_PHOTO_FOLDER'] = r'static\images\recipes'
+app.config['PROFILE_PHOTO_FOLDER'] = r'static\images\profiles'
+app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg'}
 
 bootstrap = Bootstrap5(app)
 
@@ -49,57 +59,86 @@ db.init_app(app)
 class User(db.Model, UserMixin):
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    email: Mapped[str] = mapped_column(String(100), unique=True)
-    password: Mapped[str] = mapped_column(String(100))
-    name: Mapped[str] = mapped_column(String(50))
+    email: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    password: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    description: Mapped[str] = mapped_column(String(200), nullable=True)
+    image_filepath: Mapped[str] = mapped_column(String(256), nullable=True)
     recipes: Mapped[List["Recipe"]] = relationship(back_populates="author")
-    # comments: Mapped[List["Comment"]] = relationship(back_populates="author")
+    liked_recipes: Mapped[List["Like"]] = relationship(back_populates="user")
+    comments: Mapped[List["Comment"]] = relationship(back_populates="comment_author")
 
 
 class Recipe(db.Model):
     __tablename__ = "recipes"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     title: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    description: Mapped[str] = mapped_column(String(400), nullable=True)
     ingredients: Mapped[str] = mapped_column(Text, nullable=False)
     instructions: Mapped[str] = mapped_column(Text, nullable=False)
-    type_diet: Mapped[str] = mapped_column()
+    type_diet: Mapped[str] = mapped_column(nullable=True)
     author_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
     author: Mapped["User"] = relationship(back_populates="recipes")
-    # comments: Mapped[List["Comment"]] = relationship(back_populates="parent_post", cascade="all, delete-orphan")
+    liked_by_users: Mapped[List["Like"]] = relationship(back_populates="recipe", cascade="all, delete-orphan")
+    comments: Mapped[List["Comment"]] = relationship(back_populates="parent_recipe", cascade="all, delete-orphan")
+    image_filepath: Mapped[str] = mapped_column(String(256), nullable=True)  # Users don't have to upload a photo... for now
+    image_url: Mapped[str] = mapped_column(nullable=True)
+    recipe_url: Mapped[str] = mapped_column(unique=True, nullable=True)
 
 
-# class Comment(db.Model):
-#     __tablename__ = "comments"
-#     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-#     text: Mapped[str] = mapped_column(Text, nullable=False)
-#     author_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
-#     author: Mapped["User"] = relationship(back_populates="comments")
-#     post_id: Mapped[int] = mapped_column(Integer, ForeignKey("recipes.id"))
-#     parent_post: Mapped["Recipe"] = relationship(back_populates="comments")
+class Like(db.Model):
+    __tablename__ = "likes"
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey('users.id'), primary_key=True)
+    user: Mapped["User"] = relationship(back_populates='liked_recipes')
+    recipe_id: Mapped[int] = mapped_column(Integer, ForeignKey('recipes.id'), primary_key=True)
+    recipe: Mapped["Recipe"] = relationship(back_populates='liked_by_users')
 
 
-# class Image(db.Model):
-#     id = db.Column(db.Integer, primary_key=True)
-#     filename = db.Column(db.String(255), nullable=False)
+class Comment(db.Model):
+    __tablename__ = "comments"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    author_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
+    comment_author: Mapped["User"] = relationship(back_populates="comments")
+    post_id: Mapped[int] = mapped_column(Integer, ForeignKey("recipes.id"))
+    parent_recipe: Mapped["Recipe"] = relationship(back_populates="comments")
 
 
 with app.app_context():
     db.create_all()
 
 
+def uuid_from_filename(filename):
+    split_filename = filename.split(".")
+    file_extension = split_filename[-1]
+    return str(uuid4()) + "." + file_extension
+
+
 @app.route("/")
 def home():
     result = db.session.execute(db.select(Recipe))
     recipes = result.scalars().all()[::-1]
-    return render_template("index.html", recipes=recipes)
+
+    likes = {}
+    if current_user.is_authenticated:
+        for recipe in recipes:
+            # Check if the user has liked this recipe
+            liked = any(like.user_id == current_user.id for like in recipe.liked_by_users)
+            likes[recipe.id] = liked
+    return render_template("index.html", recipes=recipes, likes=likes)
 
 
 @app.route("/add-recipe", methods=['GET', 'POST'])
 def add_recipe():
+
+    if not current_user.is_authenticated:
+        return redirect(url_for("home"))
+
     form = RecipeForm(
         ingredients="<ul><li></li></ul>",
         instructions="<ol><li></li></ol>"
     )
+
     if form.validate_on_submit():
         title_input = form.title.data
         title_result = db.session.execute(db.select(Recipe).where(Recipe.title == title_input)).scalar()
@@ -107,58 +146,161 @@ def add_recipe():
             flash("Recipe Name already exists :( Try something spicier, like \"Kevin's Hot and Sexy Chicken!\"")
             form = RecipeForm(
                 title=form.title.data,
+                description=form.description.data,
                 ingredients=form.ingredients.data,
                 instructions=form.instructions.data,
                 type_diet=form.type_diet.data
             )
             return render_template("add-recipe.html", form=form)
+
+        filepath = None
+        image_url = None
+        if form.image_upload.data:
+            uploaded_file = form.image_upload.data
+            image_uuid = uuid_from_filename(uploaded_file.filename)
+            filepath = "images/recipes/" + image_uuid
+            uploaded_file.save(os.path.join(app.config['RECIPE_PHOTO_FOLDER'], image_uuid))
+        elif form.image_url.data:
+            image_url = form.image_url.data
+
         diets_string = ", ".join(form.type_diet.data)
+
         new_recipe = Recipe(
             title=form.title.data,
+            description=form.description.data,
             ingredients=form.ingredients.data,
             instructions=form.instructions.data,
             type_diet=diets_string,
-            author=current_user
+            author=current_user,
+            image_filepath=filepath,
+            image_url=image_url
         )
+
         db.session.add(new_recipe)
         db.session.commit()
-        return redirect(url_for("home"))
+        return redirect(url_for("display_recipe", recipe_title=form.title.data))
+
     return render_template("add-recipe.html", form=form)
 
 
-@app.route("/recipe/<int:recipe_id>")
-def display_recipe(recipe_id):
-    requested_recipe = db.get_or_404(Recipe, recipe_id)
+@app.route("/recipe/<string:recipe_title>", methods=["GET", "POST"])
+def display_recipe(recipe_title):
+    recipe = Recipe.query.filter(Recipe.title == recipe_title).first()
+    likes = Like.query.filter(Like.recipe_id == recipe.id).all()
+
+    recipe_url = None
+    recipe_source = None
+    if recipe.recipe_url:
+        recipe_url = "https://www." + recipe.recipe_url
+        recipe_domain_name = recipe.recipe_url.split(".com")[0]
+        if recipe_domain_name == "allrecipes":
+            recipe_source = "images/sources/allrecipes.svg"
+
+
+    current_user_liked = False
+    if current_user.is_authenticated:
+        for like in recipe.liked_by_users:
+            if current_user.id == like.user_id:
+                current_user_liked = True
+
+    comment_form = CommentForm()
+    if comment_form.validate_on_submit():
+        if not current_user.is_authenticated:
+            flash("You need to login or register to comment.")
+            return redirect(url_for("login"))
+
+        new_comment = Comment(
+            text=comment_form.body.data,
+            comment_author=current_user,
+            parent_recipe=recipe
+        )
+        db.session.add(new_comment)
+        db.session.commit()
+
     return render_template(
         "recipe.html",
-        recipe=requested_recipe,
+        recipe=recipe,
+        recipe_source=recipe_source,
+        recipe_urls=recipe_url,
         current_user=current_user,
+        likes=likes,
+        currently_liked=current_user_liked,
+        comment_form=comment_form
     )
 
 
-@app.route("/edit-recipe/<int:recipe_id>", methods=["GET", "POST"])
-def edit_recipe(recipe_id):
-    recipe = db.get_or_404(Recipe, recipe_id)
+@app.route("/like/<int:recipe_id>", methods=["GET", "POST"])
+def like_recipe(recipe_id):
+    recipe = Recipe.query.get_or_404(recipe_id)
+    like = Like.query.filter_by(user_id=current_user.id, recipe_id=recipe.id).first()
+
+    if like:
+        db.session.delete(like)
+        db.session.commit()
+    else:
+        new_like = Like(user=current_user, recipe=recipe)
+        db.session.add(new_like)
+        db.session.commit()
+
+    next_page = request.args.get("page")
+
+    if next_page == "display_recipe":
+        return redirect(url_for("display_recipe", recipe_title=recipe.title))
+    elif next_page == "home":
+        return redirect(url_for("home"))
+
+
+@app.route("/edit-recipe/<string:recipe_title>", methods=["GET", "POST"])
+def edit_recipe(recipe_title):
+    recipe = Recipe.query.filter(Recipe.title == recipe_title).first()
+    if current_user.id != recipe.author_id:
+        return redirect(url_for("home"))
+
+    if recipe.type_diet:
+        type_diet_formatted = recipe.type_diet.split(", ")
+    else:
+        type_diet_formatted = None
+
     edit_form = RecipeForm(
         title=recipe.title,
+        description=recipe.description,
         ingredients=recipe.ingredients,
         instructions=recipe.instructions,
-        type_diet=recipe.type_diet.split(", "),
-        author=recipe.author,
+        type_diet=type_diet_formatted,
+        image_url=recipe.image_url,
     )
+
     if edit_form.validate_on_submit():
+
+        filepath = recipe.image_filepath
+        image_url = recipe.image_url
+        if edit_form.image_upload.data:
+            uploaded_file = edit_form.image_upload.data
+            image_uuid = uuid_from_filename(uploaded_file.filename)
+            filepath = "images/recipes/" + image_uuid
+            if recipe.image_filepath:
+                os.remove(f"static/{recipe.image_filepath}")
+            uploaded_file.save(os.path.join(app.config['RECIPE_PHOTO_FOLDER'], image_uuid))
+        elif edit_form.image_url.data:
+            image_url = edit_form.image_url.data
+
         diets_string = ", ".join(edit_form.type_diet.data)
+
         recipe.title = edit_form.title.data
+        recipe.description = edit_form.description.data
         recipe.ingredients = edit_form.ingredients.data
         recipe.instructions = edit_form.instructions.data
         recipe.type_diet = diets_string
-        recipe.author = current_user
+        recipe.image_filepath = filepath
+        recipe.image_url = image_url
         db.session.commit()
-        return redirect(url_for("display_recipe", recipe_id=recipe.id))
+        return redirect(url_for("display_recipe", recipe_title=recipe.title))
+
     return render_template(
         "add-recipe.html",
         form=edit_form,
-        is_edit=True,
+        editing=True,
+        recipe_title=recipe.title,
         current_user=current_user
     )
 
@@ -171,16 +313,27 @@ def delete_recipe(recipe_id):
     return redirect(url_for("home"))
 
 
-# TODO Search function sucks, make better (Has to be exactly matching query, can't separate ingredients
-#  by comma, or search phrases that don't exactly match)
 @app.route("/search")
 def search_recipe():
     search_param = request.args.get('query')
-    title_results = Recipe.query.filter(Recipe.title.like(f'%{search_param}%')).all()
-    ingredients_results = Recipe.query.filter(Recipe.ingredients.like(f'%{search_param}%')).all()
-    instructions_results = Recipe.query.filter(Recipe.instructions.like(f'%{search_param}%')).all()
-    recipes_set = set(title_results + ingredients_results + instructions_results)
-    return render_template("index.html", recipes=recipes_set)
+    recipes = None
+    if search_param:
+        formatted_param = re.sub(r'[^a-zA-Z0-9\- ]', "", search_param)
+        param_list = formatted_param.split()
+        recipe_list = []
+        # TODO Add "description" to what is searched?
+        for substring in param_list:
+            title_results = Recipe.query.filter(Recipe.title.like(f'%{substring}%')).all()
+            recipe_list.extend(title_results)
+            ingredients_results = Recipe.query.filter(Recipe.ingredients.like(f'%{substring}%')).all()
+            recipe_list.extend(ingredients_results)
+            instructions_results = Recipe.query.filter(Recipe.instructions.like(f'%{substring}%')).all()
+            recipe_list.extend(instructions_results)
+        recipes = list(dict.fromkeys(recipe_list))[::-1]
+    return render_template("search.html",
+                           search_param=search_param,
+                           recipes=recipes,
+                           )
 
 
 @app.route("/ai-recipe", methods=["GET", "POST"])
@@ -193,7 +346,8 @@ def ai_recipe():
                     "role": "system",
                     "content": "You are a chef with knowledge in every culture and cuisine. Use only "
                                "user provided and common household ingredients to respond with a simple recipe "
-                               "separated by '**Ingredients:**' and '**Instructions:**'."
+                               "with the name of the recipe in bold and separated by '**Ingredients:**' and "
+                               "'**Instructions:**'."
                 },
                 {
                     "role": "user",
@@ -204,19 +358,213 @@ def ai_recipe():
         )
         recipe_text = chat_completion.choices[0].message.content
         recipe_html = markdown(recipe_text)
-        return render_template("ai-recipe.html", form=form, recipe=recipe_html)
+
+        title = recipe_text.split("**")[1]
+        recipe_split1 = recipe_text.split("**Ingredients:**")[1]
+        recipe_split2 = recipe_split1.split("**Instructions:**")
+
+        ingredients = recipe_split2[0]
+        instructions = recipe_split2[1]
+
+        # ingredients_match = re.search(r'\*\*Ingredients:\*\*([\s\S]*?)\*\*Instructions:\*\*', recipe_text)
+        # instructions_match = re.search(r'\*\*Instructions:\*\*([\s\S]*)', recipe_text)
+        #
+        # ingredients = ingredients_match.group(1).strip() if ingredients_match else ""
+        # instructions = instructions_match.group(1).strip() if instructions_match else ""
+
+        session['ai_recipe'] = {
+            'title': title,
+            'ingredients': ingredients,
+            'instructions': instructions
+        }
+
+        return render_template("ai-recipe.html", form=form, recipe=recipe_html, ai_recipe_gen=True)
     return render_template("ai-recipe.html", form=form)
 
 
-# TODO disallow user from accessing /register or /login if already logged in or redirect
+@app.route("/save-ai-recipe", methods=["POST"])
+def save_ai_recipe():
+    if not current_user.is_authenticated:
+        return redirect(url_for("home"))
+
+    recipe = session.get('ai_recipe')
+    if not recipe:
+        flash("No AI-generated recipe to save!")
+        return redirect(url_for("ai_recipe"))
+
+    title = recipe['title']
+    ingredients = markdown(recipe['ingredients'])
+    instructions = markdown(recipe['instructions'])
+
+    existing_recipe = Recipe.query.filter_by(title=title).first()
+    if existing_recipe:
+        flash("A recipe with this title already exists.")
+        return redirect(url_for("ai_recipe"))
+
+    new_recipe = Recipe(
+        title=title,
+        description="This recipe was generated using Recipe AI™!",
+        ingredients=ingredients,
+        instructions=instructions,
+        author=current_user,
+    )
+
+    db.session.add(new_recipe)
+    db.session.commit()
+
+    return redirect(url_for("display_recipe", recipe_title=title))
+
+
+# TODO add more websites to webscrape capabilities
+@app.route("/recipe-saver", methods=["GET", "POST"])
+def recipe_saver():
+    if not current_user.is_authenticated:
+        return redirect(url_for("home"))
+
+    recipe_url_form = GetRecipeForm()
+
+    if recipe_url_form.validate_on_submit():
+
+        split_url = None
+        url_www_split = recipe_url_form.recipe_url.data.split("www.")
+        if len(url_www_split) == 1:
+            split_url = url_www_split[0]
+        elif len(url_www_split) == 2:
+            split_url = url_www_split[1]
+
+        url_com_split = split_url.split(".com")
+        if url_com_split[0] not in ALLOWED_URLS:
+            flash(f"Functionality for {url_com_split[0]} has not been integrated yet")
+            return redirect(url_for("recipe_saver"))
+        # elif url_com_split[0] == "allrecipes":
+        #     pass
+
+        recipe_url_result = Recipe.query.filter(Recipe.recipe_url == split_url).first()
+        if recipe_url_result:
+            flash(f"Someone has already saved that recipe! Try searching for it instead")
+            return redirect(url_for("recipe_saver"))
+
+        response = requests.get(recipe_url_form.recipe_url.data)
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        title = soup.find("h1", {"class": "article-heading"}).text
+        description = soup.find("p", {"class": "article-subheading"}).text
+
+        ingredients = "<ul> "
+        ing_list = soup.find_all('li', {'class': 'mm-recipes-structured-ingredients__list-item'})
+        for ing in ing_list:
+            ing_components = []
+            for span in ing.find_all('span'):
+                ing_components.append(span.text)
+            ing_full = " ".join(ing_components)
+            ingredients += f"<li>{ing_full}</li> "
+        ingredients += "</ul>"
+
+        instructions = "<ol> "
+        instructions_soup = soup.find_all('li', {
+            'class': 'comp mntl-sc-block mntl-sc-block-startgroup mntl-sc-block-group--LI'})
+        for step in instructions_soup:
+            step_text = step.find('p').text
+            instructions += f"<li>{step_text}</li> "
+        instructions += f"</ol>"
+
+        image = soup.find('img', {'class': 'primary-image__image'})
+        if image:
+            image_url = image['src']
+        else:
+            image = soup.find('img', {'id': 'mntl-sc-block-image_1-0'})
+            image_url = image['data-hi-res-src']
+
+        new_recipe = Recipe(
+            title=title,
+            description=description,
+            ingredients=ingredients,
+            instructions=instructions,
+            author=current_user,
+            image_url=image_url,
+            recipe_url=split_url
+        )
+        db.session.add(new_recipe)
+        db.session.commit()
+        return redirect(url_for("display_recipe", recipe_title=title))
+    return render_template("recipe-saver.html", form=recipe_url_form)
+
+
+@app.route("/contact", methods=["GET", "POST"])
+def contact():
+    if request.method == "POST":
+        name = request.form["name"]
+        email = request.form["email"]
+        phone = request.form["phone"]
+        message = request.form["message"]
+        send_email(name, email, phone, message)
+    return render_template("contact.html")
+
+
+def send_email(name, email, phone, message):
+    with smtplib.SMTP(host="smtp.gmail.com", port=587) as connection:
+        connection.starttls()
+        connection.login(
+            user="tokevinm@gmail.com",
+            password="tafjjnxqsjldkeuv",
+        )
+        connection.sendmail(
+            from_addr="tokevinm@gmail.com",
+            to_addrs="k1wsnt@gmail.com",
+            msg=f"Subject:New Message!\n\n Name: {name}\n Email: {email}\n Phone: {phone}\n Message: {message}"
+        )
+
+
+@app.route("/user/<string:user_name>")
+def display_profile(user_name):
+    user = User.query.filter(User.name == user_name).first()
+    user_recipes = Recipe.query.filter(Recipe.author_id == user.id).all()[::-1]
+
+    liked_recipes = []
+    if user_name == current_user.name:
+        liked_recipes = db.session.query(Recipe).join(Like).filter(Like.user_id == current_user.id).all()[::-1]
+    return render_template("profile.html", user=user, recipes=user_recipes, liked_recipes=liked_recipes)
+
+
+@app.route("/edit-profile", methods=["GET", "POST"])
+def edit_profile():
+    profile_edit_form = EditProfileForm()
+    if profile_edit_form.validate_on_submit():
+        if profile_edit_form.name.data != "":
+            current_user.name = profile_edit_form.name.data
+        if profile_edit_form.email.data != "":
+            current_user.email = profile_edit_form.email.data
+        if profile_edit_form.password.data != "":
+            current_user.password = profile_edit_form.password.data
+        if profile_edit_form.description.data != "":
+            current_user.description = profile_edit_form.description.data
+        if profile_edit_form.image_upload.data:
+            uploaded_file = profile_edit_form.image_upload.data
+            image_uuid = uuid_from_filename(uploaded_file.filename)
+            filepath = "images/profiles/" + image_uuid
+            if current_user.image_filepath:
+                os.remove(f"static/{current_user.image_filepath}")
+            uploaded_file.save(os.path.join(app.config['PROFILE_PHOTO_FOLDER'], image_uuid))
+            current_user.image_filepath = filepath
+        db.session.commit()
+        return redirect(url_for("display_profile", user_name=current_user.name))
+    return render_template(
+        "register.html",
+        form=profile_edit_form,
+        current_user=current_user
+    )
+
+
 @app.route("/register", methods=["GET", "POST"])
 def register():
+    if current_user.is_authenticated:
+        return redirect(url_for("home"))
     form = RegisterForm()
     if form.validate_on_submit():
         user = db.session.execute(db.select(User).where(User.email == form.email.data)).scalar()
         if user:
             flash("You've already signed up with that email. Log in instead!")
-            return redirect("login")
+            return redirect(url_for("login"))
         else:
             secure_password = generate_password_hash(
                 form.password.data,
@@ -231,12 +579,35 @@ def register():
             db.session.add(new_user)
             db.session.commit()
             login_user(new_user)
-            return redirect(url_for("home"))
+            return redirect(url_for("register2"))
     return render_template("register.html", form=form, current_user=current_user)
+
+
+# Is there a better way to do this?
+@app.route("/register-2", methods=["GET", "POST"])
+def register2():
+    if not current_user.is_authenticated:
+        return redirect(url_for("home"))
+    form = RegisterCont()
+    if form.validate_on_submit():
+        current_user.description = form.description.data
+        if form.image_upload.data:
+            uploaded_file = form.image_upload.data
+            image_uuid = uuid_from_filename(uploaded_file.filename)
+            filepath = "images/profiles/" + image_uuid
+            if current_user.image_filepath:  # Shouldn't for new users but 'edge case' if they're reaccessing this page
+                os.remove(f"static/{current_user.image_filepath}")
+            uploaded_file.save(os.path.join(app.config['PROFILE_PHOTO_FOLDER'], image_uuid))
+            current_user.image_filepath = filepath
+        db.session.commit()
+        return redirect(url_for("home"))
+    return render_template("register2.html", form=form, current_user=current_user)
 
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    if current_user.is_authenticated:
+        return redirect(url_for("home"))
     form = LoginForm()
     if form.validate_on_submit():
         user = db.session.execute(db.select(User).where(User.email == form.email.data)).scalar()

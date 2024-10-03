@@ -1,0 +1,25 @@
+{% from "bootstrap5/form.html" import render_form %}
+{% include "header.html" %}
+
+<main class="mb-4">
+  <div class="container">
+    <div class="row">
+      <div class="col-lg-8 col-md-10 mx-auto min-vh-100 main-content d-flex justify-content-center">
+        <div class="col-lg-5">
+          {% with messages = get_flashed_messages() %}
+            {% if messages %}
+              {% for message in messages %}
+                <p style="color: red">{{ message }}</p>
+              {% endfor %}
+            {% endif %}
+          {% endwith %}
+          {{ form.hidden_tag() }}
+          {{ render_form(form, novalidate=True) }}
+          <a href="{{ url_for('home') }}" class="btn btn-secondary btn-sm">Skip</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+{% include "footer.html" %}

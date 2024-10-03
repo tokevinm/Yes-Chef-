@@ -1,0 +1,9 @@
+.env
+__pycache__
+.venv/
+.idea/
+maybe.py
+static/images/profiles/*
+!static/images/profiles/.gitkeep
+static/images/recipes/*
+!static/images/recipes/.gitkeep
