@@ -2,6 +2,7 @@ import os
 import re
 import smtplib
 import requests
+from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 from typing import List
 from flask import Flask, render_template, redirect, url_for, flash, request, session
@@ -17,15 +18,19 @@ from markdown import markdown
 from uuid import uuid4
 from forms import RecipeForm, RegisterForm, RegisterCont, LoginForm, AIQueryForm, EditProfileForm, CommentForm, GetRecipeForm
 
-API_KEY = "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"
+load_dotenv()
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+SMTP_USER = os.environ["SMTP_USERNAME"]
+SMTP_PASSWORD = os.environ["SMTP_PASSWORD"]
+
 ALLOWED_URLS = ["allrecipes"]
 
 client = Groq(
-    api_key=API_KEY,
+    api_key=GROQ_API_KEY,
 )
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = '8BYkEfBA6O6DonzWlSihBXox7C0sKR6a'
+app.config['SECRET_KEY'] = os.environ["APP_SECRET_KEY"]
 app.config['MAX_CONTENT_LENGTH'] = 2556 * 1179
 app.config['RECIPE_PHOTO_FOLDER'] = r'static\images\recipes'
 app.config['PROFILE_PHOTO_FOLDER'] = r'static\images\profiles'
@@ -195,7 +200,6 @@ def display_recipe(recipe_title):
         recipe_domain_name = recipe.recipe_url.split(".com")[0]
         if recipe_domain_name == "allrecipes":
             recipe_source = "images/sources/allrecipes.svg"
-
 
     current_user_liked = False
     if current_user.is_authenticated:
@@ -505,12 +509,12 @@ def send_email(name, email, phone, message):
     with smtplib.SMTP(host="smtp.gmail.com", port=587) as connection:
         connection.starttls()
         connection.login(
-            user="tokevinm@gmail.com",
-            password="tafjjnxqsjldkeuv",
+            user=SMTP_USER,
+            password=SMTP_PASSWORD,
         )
         connection.sendmail(
-            from_addr="tokevinm@gmail.com",
-            to_addrs="k1wsnt@gmail.com",
+            from_addr=SMTP_USER,
+            to_addrs=SMTP_USER,
             msg=f"Subject:New Message!\n\n Name: {name}\n Email: {email}\n Phone: {phone}\n Message: {message}"
         )
 
