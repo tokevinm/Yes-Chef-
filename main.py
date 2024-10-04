@@ -587,7 +587,7 @@ def register():
     return render_template("register.html", form=form, current_user=current_user)
 
 
-# Is there a better way to do this?
+# Additional user profile info after registration; can it be done better?
 @app.route("/register-2", methods=["GET", "POST"])
 def register2():
     if not current_user.is_authenticated:
