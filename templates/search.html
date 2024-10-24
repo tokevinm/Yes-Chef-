@@ -1,0 +1,47 @@
+{% from "bootstrap5/form.html" import render_form %}
+{% include "header.html" %}
+
+<div class="container px-4 px-lg-5">
+  <div class="row gx-4 gx-lg-5 justify-content-center">
+    <div class="col-md-10 col-lg-8 col-xl-7 min-vh-100 main-content">
+
+      <p>Showing search results for '{{ search_param }}'</p>
+
+      {% for recipe in recipes %}
+      <div>
+        {% if recipe.image_filepath %}
+        <img src="{{ url_for('static', filename=recipe.image_filepath) }}"
+             class="recipe-image"
+             style="max-width: 90%;">
+        <br>
+        {% elif recipe.image_url %}
+        <img src="{{ recipe.image_url }}"
+             class="recipe-image"
+             style="max-width: 90%;">
+        <br>
+        {% endif %}
+        <h2>
+          <a href="{{ url_for('display_recipe', recipe_title=recipe.title) }}">
+            {{ recipe.title | titlecase }}
+          </a>
+        </h2>
+        <p>By
+          <a href="{{ url_for('display_profile', user_name=recipe.author.name) }}">
+            {{ recipe.author.name }}
+          </a>
+        </p>
+      </div>
+      <!-- Divider-->
+      <hr class="my-4" />
+      {% endfor %}
+
+
+      <!-- Pager-->
+      <div class="d-flex justify-content-end mb-4">
+        <a class="btn btn-secondary" href="#!">More Recipes →</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% include "footer.html" %}
