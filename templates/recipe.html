@@ -83,7 +83,15 @@
 
 
           <h4>Ingredients</h4>
-          {{ recipe.ingredients|safe }}
+          <ul id="ingredientsList">
+            {% for ingredient in recipe.ingredients %}
+            <li data-amount="{{ ingredient['amount'] }}"
+                data-unit="{{ ingredient['unit'] }}"
+                data-ingredient="{{ ingredient['ingredient'] }}">
+              <span class="amount">{{ ingredient['amount'] }}</span> {{ ingredient['unit'] }} {{ ingredient['ingredient'] }}
+            </li>
+            {% endfor %}
+          </ul>
           <h4>Instructions</h4>
           {{ recipe.instructions|safe }}
 

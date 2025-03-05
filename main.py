@@ -5,7 +5,6 @@ import smtplib
 import requests
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
-from typing import List, Dict
 from flask import Flask, render_template, redirect, url_for, flash, request, session, send_from_directory, jsonify
 from flask_bootstrap import Bootstrap5
 from flask_login import UserMixin, login_user, LoginManager, current_user, logout_user
@@ -14,6 +13,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_wtf.csrf import CSRFProtect
 from sqlalchemy.orm import relationship, DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import Integer, String, Text, ForeignKey, Float
+from sqlalchemy.types import JSON
 from werkzeug.security import generate_password_hash, check_password_hash
 from titlecase import titlecase
 from groq import Groq
@@ -79,9 +79,9 @@ class User(db.Model, UserMixin):
     name: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     description: Mapped[str] = mapped_column(String(200), nullable=True)
     image_filepath: Mapped[str] = mapped_column(String(256), nullable=True)
-    recipes: Mapped[List["Recipe"]] = relationship(back_populates="author")
-    liked_recipes: Mapped[List["Like"]] = relationship(back_populates="user")
-    comments: Mapped[List["Comment"]] = relationship(back_populates="comment_author")
+    recipes: Mapped[list["Recipe"]] = relationship(back_populates="author")
+    liked_recipes: Mapped[list["Like"]] = relationship(back_populates="user")
+    comments: Mapped[list["Comment"]] = relationship(back_populates="comment_author")
 
 
 class Recipe(db.Model):
@@ -89,16 +89,16 @@ class Recipe(db.Model):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     title: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     description: Mapped[str] = mapped_column(String(400), nullable=True)
-    ingredients: Mapped[str] = mapped_column(Text, nullable=False)
+    ingredients: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
     instructions: Mapped[str] = mapped_column(Text, nullable=False)
     type_diet: Mapped[str] = mapped_column(nullable=True)
-    nutrition_facts: Mapped[List["Nutrition"]] = relationship(back_populates="recipe", cascade="all, delete-orphan")
+    nutrition_facts: Mapped[list["Nutrition"]] = relationship(back_populates="recipe", cascade="all, delete-orphan")
     default_servings: Mapped[int] = mapped_column(Integer, nullable=False)
     time_to_cook: Mapped[str] = mapped_column(String, nullable=True)
     author_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
     author: Mapped["User"] = relationship(back_populates="recipes")
-    liked_by_users: Mapped[List["Like"]] = relationship(back_populates="recipe", cascade="all, delete-orphan")
-    comments: Mapped[List["Comment"]] = relationship(back_populates="recipe", cascade="all, delete-orphan")
+    liked_by_users: Mapped[list["Like"]] = relationship(back_populates="recipe", cascade="all, delete-orphan")
+    comments: Mapped[list["Comment"]] = relationship(back_populates="recipe", cascade="all, delete-orphan")
     image_filepath: Mapped[str] = mapped_column(String(256), nullable=True)
     # Users don't have to upload a photo for now.
     # Make so that won't show up on front page if no photo? (Warn when creating recipe)
@@ -154,6 +154,7 @@ def home():
     return render_template("index.html", recipes=recipes, likes=likes)
 
 
+# TODO fix ingredients/change form to allow for list[dict]
 @app.route("/add-recipe", methods=['GET', 'POST'])
 def add_recipe():
 
@@ -249,6 +250,13 @@ def display_recipe(recipe_title):
     likes = Like.query.filter(Like.recipe_id == recipe.id).all()
     nutrients = NutritionFacts(recipe.id)
 
+    # ingredients = "<ul> "
+    # ing_list = recipe.ingredients
+    # for ing in ing_list:
+    #     ing_full = f"{ing["amount"]} {ing["unit"]} {ing["ingredient"]}"
+    #     ingredients += f"<li>{ing_full}</li> "
+    # ingredients += "</ul>"
+
     recipe_url = None
     recipe_source = None
     if recipe.recipe_url:
@@ -257,8 +265,6 @@ def display_recipe(recipe_title):
         if recipe_domain_name == "allrecipes":
             recipe_source = "images/sources/allrecipes.svg"
 
-    # TODO can do "if current_user in liked" or "if recipe in user's_likes something like that?
-    #  i.e. query for existence of a like with recipe.id and author.id? Prob tried already but maybe not?
     current_user_liked = False
     if current_user.is_authenticated:
         for like in recipe.liked_by_users:
@@ -283,6 +289,7 @@ def display_recipe(recipe_title):
     return render_template(
         "recipe.html",
         recipe=recipe,
+        # ingredients=ingredients,
         nutrients=nutrients,
         recipe_source=recipe_source,
         recipe_url=recipe_url,
@@ -451,6 +458,7 @@ def ai_recipe():
     return render_template("ai-recipe.html", form=form)
 
 
+# TODO fix save_ai_recipe() for ingredients list[dict]
 @app.route("/save-ai-recipe", methods=["POST"])
 def save_ai_recipe():
     if not current_user.is_authenticated:
@@ -527,15 +535,13 @@ def recipe_saver():
         title = soup.find("h1", {"class": "article-heading"}).text
         description = soup.find("p", {"class": "article-subheading"}).text
 
-        ingredients = "<ul> "
+        ingredients = []
         ing_list = soup.find_all('li', {'class': 'mm-recipes-structured-ingredients__list-item'})
         for ing in ing_list:
-            ing_components = []
-            for span in ing.find_all('span'):
-                ing_components.append(span.text)
-            ing_full = " ".join(ing_components)
-            ingredients += f"<li>{ing_full}</li> "
-        ingredients += "</ul>"
+            ing_components = {"amount": ing.find("span", {"data-ingredient-quantity": "true"}).text,
+                              "unit": ing.find("span", {"data-ingredient-unit": "true"}).text,
+                              "ingredient": ing.find("span", {"data-ingredient-name": "true"}).text}
+            ingredients.append(ing_components)
 
         instructions = "<ol> "
         instructions_soup = soup.find_all("li", {
@@ -581,7 +587,13 @@ def recipe_saver():
         db.session.add(new_recipe)
         db.session.commit()
 
-        ingredients_list = markup_to_list(ingredients)
+        ingredients_list = []
+        for ing in ingredients:
+            ingredient = f"{ing["amount"]} {ing["unit"]} {ing["ingredient"]}"
+            ingredients_list.append(ingredient)
+
+        print(ingredients_list)
+        # ingredients_list = markup_to_list(ingredients)
         edamam_ingredients = oil_converter(title, ingredients_list)
         edamam_data = edamam_nutrition_analysis(title, edamam_ingredients)
         nutrition_to_db(new_recipe, edamam_data["totalNutrients"], edamam_data["totalDaily"])
@@ -752,7 +764,7 @@ def uuid_from_filename(filename):
     return str(uuid4()) + "." + file_extension
 
 
-def markup_to_list(markup_ingredients: str) -> List[str]:
+def markup_to_list(markup_ingredients: str) -> list[str]:
     """Reformats ingredients from markup (which they're inputted and saved as to the database)
     to a List to be parsed through and analyzed"""
 
@@ -762,7 +774,7 @@ def markup_to_list(markup_ingredients: str) -> List[str]:
     return ingredients_list
 
 
-def oil_converter(title: str, ingredients: List[str]) -> List[str]:
+def oil_converter(title: str, ingredients: list[str]) -> list[str]:
     """Takes a recipe's title and a List of its ingredients as inputs to determine whether
     the amount of oil used needs to be altered to get a more accurate nutritional value calculation
     based on how the oil is used i.e. deep-frying vs. being made into a dressing/vinaigrette"""
@@ -812,7 +824,7 @@ def oil_converter(title: str, ingredients: List[str]) -> List[str]:
     return ingredients
 
 
-def edamam_nutrition_analysis(title: str, ingredients: List[str]) -> Dict:
+def edamam_nutrition_analysis(title: str, ingredients: list[str]) -> dict:
     """Takes the title and ingredients of a recipe to send a post request to the Edamam API
     to analyze the recipe for its nutritional value"""
 
@@ -836,7 +848,7 @@ def edamam_nutrition_analysis(title: str, ingredients: List[str]) -> Dict:
     return data
 
 
-def nutrition_to_db(recipe: Recipe, nutrition_dict: Dict, daily_value_dict: Dict):
+def nutrition_to_db(recipe: Recipe, nutrition_dict: dict, daily_value_dict: dict):
     """Takes a recipe and its Edamam API generated dictionaries as inputs and
     stores all Nutrition Facts related nutrients to the Nutrition table within the SQLite database.
     Follows FDA rounding guidelines for each nutrient group."""
